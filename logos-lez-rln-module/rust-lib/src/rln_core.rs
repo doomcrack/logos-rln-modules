@@ -13,6 +13,59 @@ use sha2::{Sha256, Digest};
 
 pub use rln_layouts::{MAX_RATE_LIMIT, MIN_RATE_LIMIT};
 
+/// The BN254 scalar field modulus, big-endian. The guest reads a commitment
+/// as a little-endian field element and panics on one >= this.
+const BN254_R_BE: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+
+/// Whether 32 little-endian bytes are a BN254 field element (< the modulus).
+pub fn is_field_element_le(bytes: &[u8; 32]) -> bool {
+    let mut be = *bytes;
+    be.reverse();
+    be < BN254_R_BE
+}
+
+/// The guest's own Register checks that a submitter can evaluate from chain
+/// state it already holds (plus a zero commitment, which the guest accepts but
+/// no identity derives), so a doomed registration is refused before it is
+/// signed rather than charged on chain. A guest panic (a non-field commitment,
+/// an out-of-range rate) is charged the full gas limit; an exit (capacity) its
+/// measured cycles; neither registers anything. `next_index` is the tree's,
+/// read with the plan.
+pub fn check_register(
+    config_data: &[u8],
+    next_index: u64,
+    id_commitment: &[u8; 32],
+    rate_limit: u64,
+) -> Result<(), String> {
+    if *id_commitment == [0u8; 32] {
+        return Err("invalid_commitment: the identity commitment is zero".into());
+    }
+    if !is_field_element_le(id_commitment) {
+        return Err("invalid_commitment: the identity commitment is not a BN254 field element \
+                    (as little-endian bytes it is >= the modulus)"
+            .into());
+    }
+    if !(MIN_RATE_LIMIT..=MAX_RATE_LIMIT).contains(&rate_limit) {
+        return Err(format!(
+            "invalid_rate_limit: {rate_limit} is outside the registry's {MIN_RATE_LIMIT}..={MAX_RATE_LIMIT}"
+        ));
+    }
+    let current = config_field_u64(config_data, CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT);
+    let max = config_field_u64(config_data, CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT);
+    if current.saturating_add(rate_limit) > max {
+        return Err(format!(
+            "registry_full: {current} of {max} total rate limit is taken, {rate_limit} more does not fit"
+        ));
+    }
+    if next_index >= 1u64 << TREE_DEPTH {
+        return Err(format!("tree_full: all {} leaves are taken", 1u64 << TREE_DEPTH));
+    }
+    Ok(())
+}
+
 /// A single merkle proof.
 pub struct RlnMerkleProof {
     pub leaf: [u8; 32],
@@ -670,6 +723,42 @@ mod tests {
     }
 
     // Every claim the guest asserts comes from the config and the tree shard.
+    #[test]
+    fn field_elements_are_read_little_endian() {
+        let mut ok = [0xffu8; 32];
+        ok[31] = 0x00; // top byte, little-endian
+        assert!(is_field_element_le(&ok));
+        let mut bad = [0x00u8; 32];
+        bad[31] = 0x31; // above the modulus' top byte 0x30
+        assert!(!is_field_element_le(&bad));
+        let mut r = BN254_R_BE;
+        r.reverse();
+        assert!(!is_field_element_le(&r), "the modulus itself is not an element");
+        let mut below = BN254_R_BE;
+        below[31] = 0x00;
+        below.reverse();
+        assert!(is_field_element_le(&below));
+    }
+
+    #[test]
+    fn check_register_refuses_what_the_guest_would() {
+        let config = make_config_state();
+        let good = [0x01u8; 32];
+        assert!(check_register(&config, 0, &good, MIN_RATE_LIMIT).is_ok());
+        let mut bad = [0x01u8; 32];
+        bad[31] = 0xff;
+        assert!(check_register(&config, 0, &bad, MIN_RATE_LIMIT).unwrap_err().starts_with("invalid_commitment"));
+        assert!(check_register(&config, 0, &[0u8; 32], MIN_RATE_LIMIT).unwrap_err().starts_with("invalid_commitment"));
+        assert!(check_register(&config, 0, &good, MIN_RATE_LIMIT - 1).unwrap_err().starts_with("invalid_rate_limit"));
+        assert!(check_register(&config, 0, &good, MAX_RATE_LIMIT + 1).unwrap_err().starts_with("invalid_rate_limit"));
+        assert!(check_register(&config, 1u64 << TREE_DEPTH, &good, MIN_RATE_LIMIT).unwrap_err().starts_with("tree_full"));
+        let mut full = config.clone();
+        let max = config_field_u64(&full, CONFIG_OFFSET_MAX_TOTAL_RATE_LIMIT);
+        full[CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT..CONFIG_OFFSET_CURRENT_TOTAL_RATE_LIMIT + 8]
+            .copy_from_slice(&max.to_le_bytes());
+        assert!(check_register(&full, 0, &good, MIN_RATE_LIMIT).unwrap_err().starts_with("registry_full"));
+    }
+
     #[test]
     fn register_plan_reads_every_claim() {
         let config = make_config_state();

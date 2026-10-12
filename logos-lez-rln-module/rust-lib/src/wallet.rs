@@ -100,7 +100,7 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 /// v0.2.5 and a registration costs ~9.1M, so the wallet's own 2,000,000
 /// default refuses one outright. This is the per-transaction ceiling the
 /// sequencer allows; unused gas is refunded, so a cheaper call still pays less.
-const GAS_LIMIT: u64 = 10_000_000;
+pub(crate) const GAS_LIMIT: u64 = 10_000_000;
 
 #[allow(unsafe_code)]
 mod ffi {

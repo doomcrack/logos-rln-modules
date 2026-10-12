@@ -497,6 +497,16 @@ fn is_retryable_submit_error(e: &ApiError) -> bool {
     matches!(e.kind, ErrorKind::Transient | ErrorKind::NotReady | ErrorKind::ProviderFailure)
 }
 
+/// The registry module's refusal to submit, from a register_member reply
+/// `{"error":"<kind>: <reason>"}`; None for an accepted submission.
+fn register_refusal(reply: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(reply)
+        .ok()?
+        .get("error")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// Fire-and-record tail of a funded submit: record the register_member reply,
 /// or mark the record failed. Runs on the module's event loop after register
 /// returns; `store` is a Weak capture of the store the record was inserted
@@ -505,6 +515,14 @@ fn funded_submit_callback(store: Weak<Store>, hash: String) -> provider::Registe
     Box::new(move |result| {
         let update = match store.upgrade() {
             Some(store) => store.update_cache(&hash, |m| match &result {
+                // The registry module refused to submit (since lez 5.1.0: an
+                // argument or balance the program would reject). Nothing was
+                // sent, so nothing will land: fail now, with its reason,
+                // instead of waiting out the confirmation window.
+                Ok(reply) if register_refusal(reply).is_some() => {
+                    let why = register_refusal(reply).unwrap_or_default();
+                    m.record_async_submit_error(&why, false)
+                }
                 Ok(reply) => {
                     m.tx_result = Some(reply.clone());
                     // The reply's leaf_index is a pre-submit ESTIMATE; recorded

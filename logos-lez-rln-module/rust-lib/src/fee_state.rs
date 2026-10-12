@@ -56,6 +56,15 @@ pub(crate) fn fetch(sequencer: &str) -> Result<String, String> {
 /// transaction whose program panicked is included as a charged, effect-free
 /// revert, so a caller pairs this with a read of the state it meant to change.
 /// Same transport and sequencer as `get_fee_state`.
+/// The sequencer's last block id (getLastBlockId), or None when it cannot be
+/// asked. Same transport and sequencer as `get_fee_state`.
+pub(crate) fn chain_head() -> Option<u64> {
+    let sequencer = wallet::sequencer_addr()?;
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"getLastBlockId","params":[]}"#;
+    let reply = post(&sequencer, body).ok()?;
+    serde_json::from_str::<serde_json::Value>(&reply).ok()?.get("result")?.as_u64()
+}
+
 pub(crate) fn tx_included(tx_hash: &str) -> Option<bool> {
     let sequencer = wallet::sequencer_addr()?;
     let body = serde_json::json!({
