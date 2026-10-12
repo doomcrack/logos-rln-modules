@@ -7,7 +7,7 @@
 ; for per-call timeouts, like the sibling's wallet path) but the client
 ; documents the consumed wire.
 module liblogos_lez_rln_module {
-  version "5.0.0"
+  version "5.1.0"
 
   ; All replies are compact JSON strings; "" is the error value.
 
@@ -90,4 +90,10 @@ module liblogos_lez_rln_module {
   ; reserve is sized from (ensure::fee_reserve); an older sibling without the
   ; method, or "", falls back to the wallet's fixed max_fee.
   method get_fee_state() -> tstr
+
+  ; Whether a registry is usable on the module's chain, and if not why:
+  ; {"status":"ok"|"not_deployed"|"wrong_generation"|"unexpected_layout"|
+  ; "network_conflict"|"unreachable"|"invalid","detail":s?,"sequencer":s?,
+  ; "chain_head":N?}. Since 5.1.0.
+  method check_registry(config_account_id: tstr) -> tstr
 }

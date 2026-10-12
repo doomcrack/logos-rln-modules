@@ -280,19 +280,41 @@ struct RlnConfigContext {
     merkle_program: [u8; 32],
 }
 
+/// Why a config account cannot serve as a registry here. `status` is the
+/// machine-readable kind check_registry reports; `detail` says it for a person.
+struct RegistryProblem {
+    status: &'static str,
+    detail: String,
+}
+
+impl RegistryProblem {
+    fn new(status: &'static str, detail: String) -> Self {
+        Self { status, detail }
+    }
+}
+
 fn resolve_config_context(config_account_id: &str, who: &str) -> Option<RlnConfigContext> {
+    config_context(config_account_id)
+        .map_err(|p| eprintln!("{who}: {}", p.detail))
+        .ok()
+}
+
+fn config_context(config_account_id: &str) -> Result<RlnConfigContext, RegistryProblem> {
     let config_hex = resolve_account_id(config_account_id);
     if config_hex.is_empty() {
-        eprintln!("{who}: failed to resolve config account");
-        return None;
+        return Err(RegistryProblem::new(
+            "invalid",
+            format!("'{config_account_id}' is not an account id"),
+        ));
     }
     if let Some(reason) = network_conflict(wallet::bound_network().as_deref(), &config_hex) {
-        eprintln!("{who}: {reason}");
-        return None;
+        return Err(RegistryProblem::new("network_conflict", reason));
     }
     let Some(shards) = fetch_shards(&config_hex) else {
-        eprintln!("{who}: failed to fetch config account");
-        return None;
+        return Err(RegistryProblem::new(
+            "unreachable",
+            format!("could not read config account {config_hex} from the sequencer"),
+        ));
     };
     // On LEZ v0.3.0 a program's id is the header account its deployer created,
     // not derivable from anything a registry id carries. The config is the
@@ -303,12 +325,21 @@ fn resolve_config_context(config_account_id: &str, who: &str) -> Option<RlnConfi
         .into_iter()
         .filter(|(p, data)| *p != NATIVE_TOKEN_PROGRAM && !data.is_empty());
     let Some((registration_program, config_data)) = program_shards.next() else {
-        eprintln!("{who}: config account {config_hex} holds no program shard — not deployed here");
-        return None;
+        // What a reset zone looks like: the URL still answers, every account
+        // is gone. The same answer for a registry that never existed here.
+        return Err(RegistryProblem::new(
+            "not_deployed",
+            format!(
+                "config account {config_hex} holds no program state on this chain — the registry \
+                 is not deployed here (the network may have been reset)"
+            ),
+        ));
     };
     if program_shards.next().is_some() {
-        eprintln!("{who}: config account {config_hex} holds more than one program shard");
-        return None;
+        return Err(RegistryProblem::new(
+            "unexpected_layout",
+            format!("config account {config_hex} holds more than one program shard"),
+        ));
     }
     // The one place a config account is admitted, and so the one place its
     // generation is checked. Every field below is read by byte offset and
@@ -316,17 +347,19 @@ fn resolve_config_context(config_account_id: &str, who: &str) -> Option<RlnConfi
     // program generation does not fail to decode — it decodes to a plausible
     // wrong treasury and a plausible wrong price. Length is the only signal.
     if config_data.len() != native::CONFIG_STATE_SIZE {
-        eprintln!(
-            "{who}: config shard is {} bytes, expected {} — this is a config \
-             from a different program generation, not a short read",
-            config_data.len(),
-            native::CONFIG_STATE_SIZE,
-        );
-        return None;
+        return Err(RegistryProblem::new(
+            "wrong_generation",
+            format!(
+                "config shard is {} bytes, expected {} — this is a config from a different \
+                 program generation, not a short read",
+                config_data.len(),
+                native::CONFIG_STATE_SIZE,
+            ),
+        ));
     }
     let merkle_program =
         native::config_field_32(&config_data, native::CONFIG_OFFSET_MERKLE_PROGRAM_ID);
-    Some(RlnConfigContext {
+    Ok(RlnConfigContext {
         config_data,
         registration_program,
         merkle_program,
@@ -611,6 +644,53 @@ struct RegisterWatch {
 /// the block gas cap, which fits one registration per block) is left alone:
 /// re-sending it would race the original, and the loser pays a full
 /// registration's gas for nothing.
+/// Storage bytes a Register declares beside its gas limit when the fee
+/// reserve is sized; the same allowance liblogos_rln_module reserves for.
+const REGISTER_DATA_ALLOWANCE: u128 = 100_000;
+
+/// Everything the guest would refuse that can be known before signing:
+/// rln_core::check_register's argument and capacity checks, and whether the
+/// payer can cover the price plus the fee reserve at the next block's base fee
+/// ceiling (skipped when no fee quote can be had — an outage is not a refusal).
+/// LEZ v0.3.0 has no transaction simulation, so this is the only way to keep a
+/// doomed registration from being signed and charged.
+fn preflight_register(
+    ctx: &RlnConfigContext,
+    plan: &RlnRegisterPlan,
+    id_commitment: &[u8; 32],
+    rate_limit: u64,
+    payer_hex: &str,
+) -> Result<(), String> {
+    native::check_register(&ctx.config_data, plan.next_leaf_index, id_commitment, rate_limit)?;
+    let quote: Option<serde_json::Value> = serde_json::from_str(&fee_state::get_fee_state()).ok();
+    let ceiling = |key: &str| {
+        quote
+            .as_ref()
+            .and_then(|q| q.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .map(u128::from)
+    };
+    let (Some(exec), Some(stor)) = (ceiling("next_base_fee_exec_ceiling"), ceiling("next_base_fee_stor_ceiling"))
+    else {
+        return Ok(());
+    };
+    let Some((_, balance)) = wallet::native_balance(payer_hex) else {
+        return Ok(());
+    };
+    let price = plan.price_per_unit.saturating_mul(u128::from(rate_limit));
+    let reserve = u128::from(wallet::GAS_LIMIT)
+        .saturating_mul(exec)
+        .saturating_add(REGISTER_DATA_ALLOWANCE.saturating_mul(stor));
+    let needed = price.saturating_add(reserve);
+    if balance < needed {
+        return Err(format!(
+            "insufficient_balance: payer {payer_hex} holds {balance}, a registration needs {needed} \
+             ({price} price + {reserve} fee reserve at the next block's base fee ceiling)"
+        ));
+    }
+    Ok(())
+}
+
 fn spawn_register_watch(w: RegisterWatch) {
     let spawned = std::thread::Builder::new()
         .name("lez-rln-register-watch".into())
@@ -657,6 +737,15 @@ fn register_watch(mut w: RegisterWatch) {
                  a later register_member call starts afresh"
             );
             reg_in_flight(|m| m.remove(&w.reg_key));
+            return;
+        }
+        // A revert that fresh claims cannot fix (an argument the guest refuses,
+        // a full registry, a payer that cannot pay) would revert, and be
+        // charged, on every re-send.
+        if let Err(why) = preflight_register(&ctx, &plan, &w.id_commitment, w.rate_limit, &w.payer_hex) {
+            eprintln!("{WHO}: tx {} reverted and a re-send would too — not re-sending: {why}", w.tx_hash);
+            let reply = serde_json::json!({ "error": why }).to_string();
+            reg_in_flight(|m| m.insert(w.reg_key.clone(), (reply, Instant::now())));
             return;
         }
         eprintln!(
@@ -884,6 +973,13 @@ impl LiblogosLezRlnModule for LogosLezRlnModuleImpl {
             .to_string();
         }
 
+        if let Err(why) =
+            preflight_register(&ctx, &plan, &id_commitment, rate_limit as u64, &payer_hex)
+        {
+            eprintln!("register_member: not submitting: {why}");
+            return serde_json::json!({ "error": why }).to_string();
+        }
+
         // In-flight dedup (see REG_IN_FLIGHT): the first caller submits;
         // concurrent and repeat callers get the first submission's reply.
         let reg_key = membership_pda_hex.clone();
@@ -1002,6 +1098,23 @@ impl LiblogosLezRlnModule for LogosLezRlnModuleImpl {
             ),
         })
         .to_string()
+    }
+
+    fn check_registry(&self, config_account_id: String) -> String {
+        let mut out = match config_context(&config_account_id) {
+            Ok(ctx) => serde_json::json!({
+                "status": "ok",
+                "registration_program": bytes_to_hex(&ctx.registration_program),
+            }),
+            Err(p) => serde_json::json!({"status": p.status, "detail": p.detail}),
+        };
+        if let Some(sequencer) = wallet::sequencer_addr() {
+            out["sequencer"] = serde_json::json!(sequencer);
+        }
+        if let Some(head) = fee_state::chain_head() {
+            out["chain_head"] = serde_json::json!(head);
+        }
+        out.to_string()
     }
 
     fn get_registry_bounds(&self, config_account_id: String) -> String {

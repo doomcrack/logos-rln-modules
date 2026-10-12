@@ -339,6 +339,14 @@ fn provision_one(
         }
     }
 
+    // A registry that is not on this chain cannot be provisioned however long
+    // the funding wait runs: a reset network, a registry from another program
+    // version. Say so now, instead of failing later on an empty read or
+    // waiting for funds that would buy nothing.
+    if let Some(msg) = crate::provider::registry_problem(prov, registry) {
+        return Err(ApiError::new(ErrorKind::UnknownRegistry, &msg));
+    }
+
     // 2. The price and the fee reserve. Read before the funding wait so the
     //    log can name the number being waited for.
     let price = registration_price(prov, registry, rate_limit)?;

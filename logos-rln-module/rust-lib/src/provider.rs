@@ -437,6 +437,62 @@ pub(crate) trait RegistryProvider: Send + Sync {
     /// older chain-access module without the method included — and the
     /// caller falls back to a fixed reserve.
     fn fee_state(&self) -> Result<serde_json::Value, ApiError>;
+
+    /// Whether the registry is deployed on the chain the provider reads, as
+    /// the sibling's raw check object (`{status, detail?, sequencer?,
+    /// chain_head?}`). An error means the question could not be asked.
+    fn check_registry(&self, registry: &CanonicalRegistryId) -> Result<serde_json::Value, ApiError>;
+}
+
+/// The registry statuses that mean "this registry cannot work here", as
+/// opposed to "could not tell" (`unreachable`, or no answer at all).
+const REGISTRY_PROBLEMS: [&str; 5] =
+    ["not_deployed", "wrong_generation", "unexpected_layout", "network_conflict", "invalid"];
+
+/// A sentence for the caller when the registry is known not to be usable on
+/// the provider's chain: a reset network, a registry from another program
+/// version, the wrong network. None when it is fine or the check could not
+/// be made — a transient outage must not read as a missing registry.
+pub(crate) fn registry_problem(
+    prov: &dyn RegistryProvider,
+    registry: &CanonicalRegistryId,
+) -> Option<String> {
+    let check = prov.check_registry(registry).ok()?;
+    registry_problem_from(&registry.canonical, &check)
+}
+
+fn registry_problem_from(canonical: &str, check: &serde_json::Value) -> Option<String> {
+    let status = check.get("status")?.as_str()?;
+    if !REGISTRY_PROBLEMS.contains(&status) {
+        return None;
+    }
+    let detail = check.get("detail").and_then(|d| d.as_str()).unwrap_or(status);
+    let at = match (
+        check.get("sequencer").and_then(|s| s.as_str()),
+        check.get("chain_head").and_then(serde_json::Value::as_u64),
+    ) {
+        (Some(seq), Some(head)) => format!(" on {seq} (chain at block {head})"),
+        (Some(seq), None) => format!(" on {seq}"),
+        _ => String::new(),
+    };
+    Some(format!("registry {canonical} is not usable{at}: {status} — {detail}"))
+}
+
+/// A failed registry read, explained when the registry itself is the cause:
+/// an empty reply from the sibling says nothing, so ask it whether the
+/// registry is there at all and, if not, say that instead.
+fn explained(
+    prov: &dyn RegistryProvider,
+    registry: &CanonicalRegistryId,
+    e: ApiError,
+) -> ApiError {
+    if e.kind != ErrorKind::ProviderFailure {
+        return e;
+    }
+    match registry_problem(prov, registry) {
+        Some(msg) => ApiError::new(ErrorKind::UnknownRegistry, &msg),
+        None => e,
+    }
 }
 
 /// Turn a sibling `get_valid_roots` reply into roots at the prover's circuit
@@ -564,7 +620,8 @@ impl RegistryProvider for LezRlnProvider {
                     done,
                 )
             }),
-        )?;
+        )
+        .map_err(|e| explained(self, registry, e))?;
         parse_membership_reply(&raw)
     }
 
@@ -646,7 +703,8 @@ impl RegistryProvider for LezRlnProvider {
                     done,
                 )
             }),
-        )?;
+        )
+        .map_err(|e| explained(self, registry, e))?;
         let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
             ApiError::new(ErrorKind::ProviderFailure, &format!("proofs reply parse: {e}"))
         })?;
@@ -672,7 +730,8 @@ impl RegistryProvider for LezRlnProvider {
             await_reply("get_valid_roots", READ_TIMEOUT, |done| {
                 client.get_valid_roots_async_with_timeout(&registry.account, READ_TIMEOUT, done)
             }),
-        )?;
+        )
+        .map_err(|e| explained(self, registry, e))?;
         let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
             ApiError::new(ErrorKind::ProviderFailure, &format!("roots reply parse: {e}"))
         })?;
@@ -690,7 +749,8 @@ impl RegistryProvider for LezRlnProvider {
             await_reply("get_registry_bounds", READ_TIMEOUT, |done| {
                 client.get_registry_bounds_async_with_timeout(&registry.account, READ_TIMEOUT, done)
             }),
-        )?;
+        )
+        .map_err(|e| explained(self, registry, e))?;
         serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
             ApiError::new(ErrorKind::ProviderFailure, &format!("bounds reply parse: {e}"))
         })
@@ -745,6 +805,20 @@ impl RegistryProvider for LezRlnProvider {
         )?;
         serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
             ApiError::new(ErrorKind::ProviderFailure, &format!("fee state parse: {e}"))
+        })
+    }
+
+    fn check_registry(&self, registry: &CanonicalRegistryId) -> Result<serde_json::Value, ApiError> {
+        ensure_network(registry)?;
+        let client = lez_client();
+        let raw = read_reply(
+            "check_registry",
+            await_reply("check_registry", READ_TIMEOUT, |done| {
+                client.check_registry_async_with_timeout(&registry.account, READ_TIMEOUT, done)
+            }),
+        )?;
+        serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+            ApiError::new(ErrorKind::ProviderFailure, &format!("check_registry parse: {e}"))
         })
     }
 }
@@ -869,6 +943,24 @@ mod tests {
 
     // A reply that never claimed "not registered" must not be read as one:
     // the poller acts on an authoritative absence by erasing the membership.
+    #[test]
+    fn a_missing_registry_is_explained_and_an_outage_is_not() {
+        let gone = serde_json::json!({
+            "status": "not_deployed",
+            "detail": "config account ab holds no program state",
+            "sequencer": "https://testnet.lez.logos.co/",
+            "chain_head": 12,
+        });
+        let msg = registry_problem_from("logos:testnet:ab", &gone).expect("explained");
+        assert!(msg.contains("not_deployed"), "{msg}");
+        assert!(msg.contains("https://testnet.lez.logos.co/ (chain at block 12)"), "{msg}");
+        for status in ["ok", "unreachable", "something_new"] {
+            let check = serde_json::json!({"status": status});
+            assert!(registry_problem_from("logos:testnet:ab", &check).is_none(), "{status}");
+        }
+        assert!(registry_problem_from("logos:testnet:ab", &serde_json::json!({})).is_none());
+    }
+
     #[test]
     fn a_reply_without_registered_is_a_provider_failure() {
         for raw in [
