@@ -37,9 +37,11 @@ pub(crate) fn provision_impl(options_json: &str) -> Result<serde_json::Value, Ap
     let mut config_existed = config_path.exists();
     if !config_existed {
         let config = serde_json::json!({
-            // Dual-shape sequencer field, mirroring stage.sh: lez >= v0.2.1
-            // requires `sequencers` (no serde default), the rc6-era wallet
-            // reads flat `sequencer_addr`; neither denies unknown fields.
+            // Every sequencer field shape, mirroring stage.sh: lez >= v0.3.1
+            // requires `sequencer`, v0.2.1-v0.3.0 `sequencers` (no serde
+            // default), the rc6-era wallet flat `sequencer_addr`; none denies
+            // unknown fields.
+            "sequencer": { "sequencer_addr": sequencer },
             "sequencer_addr": sequencer,
             "sequencers": [{ "sequencer_addr": sequencer }],
             "seq_poll_timeout": "30s",
@@ -155,6 +157,7 @@ mod tests {
         assert_eq!(
             on_disk,
             serde_json::json!({
+                "sequencer": { "sequencer_addr": "https://seq.example/" },
                 "sequencer_addr": "https://seq.example/",
                 "sequencers": [{ "sequencer_addr": "https://seq.example/" }],
                 "seq_poll_timeout": "30s",
