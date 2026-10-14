@@ -22,11 +22,11 @@
       "sequencer": "https://testnet.lez.logos.co/",
       "registries": [
         {
-          "deployment": "testnet-v03-z1",
-          "config_account": "7MmMuwebPWvYM8x6ic5KzfEWFqeN2fcK4D54oXBGuk6m",
-          "tree_id": "81dc01d66d8e34fcbf7ad12614e70ae046f816a1e48f9f712a63c81b53a8024a",
-          "registration_program_id": "e4a5bd201f8c79ccec20367b5d51b9dc9f48e6fcf5ff71ee88ce31ca84299800",
-          "merkle_program_id": "2273fd09a637e672890f954b0f0ef2ee21561ed5905fbcb9ca2c7a06cecbe3ba"
+          "deployment": "testnet-v03-z3",
+          "config_account": "J3NXPWUspX2zqJU3tUbR6MHmm83aJc5AzvidEaBBKnat",
+          "tree_id": "4f3e8ef1b38ae86eb1e8180f6b864b10f0e5ff45b1a2e5ff84d8562b40fa0fc9",
+          "registration_program_id": "eb53eb29132ef2a4ae1073ee206ac584a7aeea560146c3a600f5f4034703ca68",
+          "merkle_program_id": "0a69f1b28291d32dc2d3442c2f333c22e5cfae891eb9a7e184b31c32156a8cee"
         }
       ]
     }

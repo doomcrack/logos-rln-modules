@@ -229,13 +229,11 @@ mod ffi {
         pub fn wallet_ffi_open(
             config_path: *const c_char,
             storage_path: *const c_char,
-            statistics_path: *const c_char,
         ) -> *mut WalletHandle;
 
         pub fn wallet_ffi_create_new(
             config_path: *const c_char,
             storage_path: *const c_char,
-            statistics_path: *const c_char,
             password: *const c_char,
         ) -> CreateWalletOutput;
 
@@ -792,12 +790,14 @@ pub(crate) fn sequencer_addr() -> Option<String> {
     sequencer_of_config(&raw)
 }
 
-/// `sequencers[0].sequencer_addr`, else the flat `sequencer_addr` — the two
-/// shapes `wallet_config_json` writes, since an adopted home may carry either.
+/// `sequencer.sequencer_addr`, else `sequencers[0].sequencer_addr`, else the
+/// flat `sequencer_addr` — the shapes `wallet_config_json` writes, since an
+/// adopted home may carry any of them.
 fn sequencer_of_config(raw: &str) -> Option<String> {
     let config: serde_json::Value = serde_json::from_str(raw).ok()?;
     config
-        .pointer("/sequencers/0/sequencer_addr")
+        .pointer("/sequencer/sequencer_addr")
+        .or_else(|| config.pointer("/sequencers/0/sequencer_addr"))
         .or_else(|| config.get("sequencer_addr"))
         .and_then(|s| s.as_str())
         .map(str::trim)
@@ -885,9 +885,8 @@ fn bring_up(home: &Path) {
     // The config is in place by now: `plan_home` adopted it or wrote it.
     let config_path = home.join(CONFIG_FILE);
     let storage_path = home.join("storage.json");
-    let statistics_path = home.join("statistics.json");
 
-    let handle = open_with_retry(&config_path, &storage_path, &statistics_path);
+    let handle = open_with_retry(&config_path, &storage_path);
 
     if let Err(e) = import_payer_key(&handle) {
         fail(&e);
@@ -943,7 +942,7 @@ fn bring_up(home: &Path) {
 /// prints, while the benefit is that the common cause now heals itself. The
 /// detail string carries the real error either way, and `LATCH_AFTER` makes a
 /// persistent failure say so in as many words.
-fn open_with_retry(config: &Path, storage: &Path, statistics: &Path) -> Handle {
+fn open_with_retry(config: &Path, storage: &Path) -> Handle {
     /// Past this much continuous failure, keep retrying but stop implying the
     /// wait is routine: something needs looking at.
     const LATCH_AFTER: Duration = Duration::from_secs(600);
@@ -952,7 +951,7 @@ fn open_with_retry(config: &Path, storage: &Path, statistics: &Path) -> Handle {
     let mut attempt = 0_u64;
     loop {
         attempt += 1;
-        match open_or_create(config, storage, statistics) {
+        match open_or_create(config, storage) {
             Ok(h) => {
                 if attempt > 1 {
                     eprintln!(
@@ -1012,14 +1011,13 @@ fn sleep_in_slices(total: Duration) {
 }
 
 #[allow(unsafe_code)]
-fn open_or_create(config: &Path, storage: &Path, statistics: &Path) -> Result<Handle, String> {
+fn open_or_create(config: &Path, storage: &Path) -> Result<Handle, String> {
     let c = cstring(config)?;
     let s = cstring(storage)?;
-    let t = cstring(statistics)?;
 
     if storage.exists() {
-        // SAFETY: three valid null-terminated paths, alive across the call.
-        let raw = unsafe { ffi::wallet_ffi_open(c.as_ptr(), s.as_ptr(), t.as_ptr()) };
+        // SAFETY: two valid null-terminated paths, alive across the call.
+        let raw = unsafe { ffi::wallet_ffi_open(c.as_ptr(), s.as_ptr()) };
         if raw.is_null() {
             return Err(format!("open {} returned no handle", storage.display()));
         }
@@ -1038,8 +1036,8 @@ fn open_or_create(config: &Path, storage: &Path, statistics: &Path) -> Result<Ha
     // (storage.json is plaintext either way), so there is nothing to remember
     // and nothing gained by inventing a secret here.
     let pw = CString::new("").map_err(|e| e.to_string())?;
-    // SAFETY: four valid null-terminated strings, alive across the call.
-    let out = unsafe { ffi::wallet_ffi_create_new(c.as_ptr(), s.as_ptr(), t.as_ptr(), pw.as_ptr()) };
+    // SAFETY: three valid null-terminated strings, alive across the call.
+    let out = unsafe { ffi::wallet_ffi_create_new(c.as_ptr(), s.as_ptr(), pw.as_ptr()) };
     if out.wallet.is_null() {
         return Err(format!(
             "create_new at {} returned no handle",
@@ -1160,8 +1158,9 @@ fn cstring(path: &Path) -> Result<CString, String> {
 /// readable here and vice versa.
 fn wallet_config_json(sequencer: &str) -> String {
     serde_json::json!({
-        // v0.2.5 reads `sequencers`; the flat field is what the rc6-era wallet
-        // read. Neither denies unknown fields, so both can ride along.
+        // v0.3.1 reads `sequencer`, v0.2.5-v0.3.0 `sequencers`, the rc6-era
+        // wallet the flat field. None denies unknown fields, so all ride along.
+        "sequencer": { "sequencer_addr": sequencer },
         "sequencer_addr": sequencer,
         "sequencers": [{ "sequencer_addr": sequencer }],
         "seq_poll_timeout": "30s",
@@ -1473,7 +1472,6 @@ mod wallet_ffi_test_transport {
     pub extern "C" fn wallet_ffi_open(
         _c: *const c_char,
         _s: *const c_char,
-        _t: *const c_char,
     ) -> *mut ffi::WalletHandle {
         std::ptr::null_mut()
     }
@@ -1482,7 +1480,6 @@ mod wallet_ffi_test_transport {
     pub extern "C" fn wallet_ffi_create_new(
         _c: *const c_char,
         _s: *const c_char,
-        _t: *const c_char,
         _p: *const c_char,
     ) -> ffi::CreateWalletOutput {
         ffi::CreateWalletOutput {

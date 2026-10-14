@@ -1758,7 +1758,7 @@ dependencies = [
 [[package]]
 name = "rln-layouts"
 version = "0.1.0"
-source = "git+https://github.com/logos-co/logos-lez-rln.git?rev=e54598d2dc30f68075ab5d37e087b04aa5966242#e54598d2dc30f68075ab5d37e087b04aa5966242"
+source = "git+https://github.com/logos-co/logos-lez-rln.git?rev=b51af7397d1dd61972223e417cb02cdd8395d859#b51af7397d1dd61972223e417cb02cdd8395d859"
 dependencies = [
  "borsh",
  "bytemuck",

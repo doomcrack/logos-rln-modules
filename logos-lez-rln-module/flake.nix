@@ -20,12 +20,18 @@
     # on macOS, a Metal toolchain stub and an unsandboxed build; the LEZ flake
     # supplies all of that and a module flake cannot.
     #
-    # Upstream LEZ v0.3.0 (db66590a). The wallet takes its execution gas limit
+    # Upstream LEZ v0.3.1: wallet_ffi_open/create_new take no statistics path,
+    # and the wallet config names one `sequencer`. The wallet takes its execution gas limit
     # from config here (#884), which a registration needs: ~9.1M of the 10M
     # cap, against a stock default of 2M. The rc3 fork this replaced carried
     # that patch before it landed.
     logos-execution-zone.url =
-      "github:logos-blockchain/logos-execution-zone/v0.3.0";
+      "github:logos-blockchain/logos-execution-zone/v0.3.1";
+    # v0.3.1's own lock pins a rust-overlay whose stable.latest predates Rust
+    # 1.98 (its rust-toolchain.toml), and the pinned logos-blockchain-mmr needs
+    # 1.98's const `usize::bit_width`: the wallet package fails to build without
+    # a newer overlay. Drop this once upstream relocks it.
+    logos-execution-zone.inputs.rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
   outputs = inputs@{ self, logos-module-builder, ... }:

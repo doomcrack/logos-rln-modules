@@ -457,7 +457,7 @@ fn testnet_membership_read_absent_or_decodes_with_live_state() {
 }
 
 /// get_fee_state's own transport (not curl) against a live sequencer: the
-/// devnet from the built-in table, or `LEZ_RLN_TESTNET_FEE_SEQUENCER`. Needs no
+/// testnet from the built-in table, or `LEZ_RLN_TESTNET_FEE_SEQUENCER`. Needs no
 /// deployment record, so it gates on LEZ_RLN_TESTNET_TESTS alone.
 #[test]
 fn testnet_fee_state_is_a_live_quote() {
@@ -466,7 +466,7 @@ fn testnet_fee_state_is_a_live_quote() {
         return;
     }
     let sequencer = std::env::var("LEZ_RLN_TESTNET_FEE_SEQUENCER").unwrap_or_else(|_| {
-        crate::networks::network("devnet").expect("devnet is in the table").sequencer.clone()
+        crate::networks::network("testnet").expect("testnet is in the table").sequencer.clone()
     });
     let raw = crate::fee_state::fetch(&sequencer)
         .unwrap_or_else(|e| panic!("getFeeState against {sequencer}: {e}"));
